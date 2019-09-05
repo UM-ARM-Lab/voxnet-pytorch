@@ -5,7 +5,7 @@ from collections import OrderedDict
 
 class VoxNet(torch.nn.Module):
 
-    def __init__(self, num_classes, input_shape=(32, 32, 32)):
+    def __init__(self, num_classes, input_shape=(32, 32, 32), num_channels=3):
                  #weights_path=None,
                  #load_body_weights=True,
                  #load_head_weights=True):
@@ -36,7 +36,7 @@ class VoxNet(torch.nn.Module):
         """
         super(VoxNet, self).__init__()
         self.body = torch.nn.Sequential(OrderedDict([
-            ('conv1', torch.nn.Conv3d(in_channels=1,
+            ('conv1', torch.nn.Conv3d(in_channels=num_channels,
                                       out_channels=32, kernel_size=5, stride=2)),
             ('lkrelu1', torch.nn.LeakyReLU()),
             ('drop1', torch.nn.Dropout(p=0.2)),
@@ -48,7 +48,7 @@ class VoxNet(torch.nn.Module):
 
         # Trick to accept different input shapes
         x = self.body(torch.autograd.Variable(
-            torch.rand((1, 1) + input_shape)))
+            torch.rand((1, num_channels) + input_shape)))
         first_fc_in_features = 1
         for n in x.size()[1:]:
             first_fc_in_features *= n

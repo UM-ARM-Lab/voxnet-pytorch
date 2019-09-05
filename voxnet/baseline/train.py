@@ -25,7 +25,7 @@ def main(args):
     print("loading module")
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     module = importlib.import_module("models."+args.model)
-    model = module.VoxNet(num_classes=args.num_classes, input_shape=(32,32,32))
+    model = module.VoxNet(num_classes=args.num_classes, input_shape=(32,32,32), num_channels=args.num_channels)
     model.to(device)
 
     # backup files
@@ -37,8 +37,8 @@ def main(args):
     #logging.info('logs will be saved to {}'.format(args.log_fname))
     #logger = Logger(args.log_fname, reinitialize=True)
     print("loading dataset")
-    dset_train = ModelNet(os.path.join(ROOT_DIR, "data"), args.training_fname)
-    dset_test = ModelNet(os.path.join(ROOT_DIR, "data"), args.testing_fname)
+    dset_train = ModelNet(os.path.join(ROOT_DIR, "data"), args.training_fname, duplicate_channels=args.num_channels)
+    dset_test = ModelNet(os.path.join(ROOT_DIR, "data"), args.testing_fname, duplicate_channels=args.num_channels)
 
     train_loader = DataLoader(dset_train, batch_size=args.batch_size, shuffle=True, num_workers=4)
     test_loader = DataLoader(dset_test, batch_size=args.batch_size, num_workers=4)
@@ -205,6 +205,7 @@ if __name__ == "__main__":
     parser.add_argument('--cont', action='store_true', default=False)
     parser.add_argument('--ckpt_dir', default='log', help='check point dir [default: log]')
     parser.add_argument('--ckpt_fname', default='model', help='check point name [default: model]')
+    parser.add_argument('--num_channels', default=3, type=int, help='number of channels for voxel grid')
     args = parser.parse_args()
 
     cudnn.benchmark = True

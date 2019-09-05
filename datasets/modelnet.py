@@ -11,7 +11,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 from utils import npytar
 
 class ModelNet(Dataset):
-    def __init__(self, filedir, filename):
+    def __init__(self, filedir, filename, duplicate_channels=1):
         reader = npytar.NpyTarReader(os.path.join(filedir, filename))
         temp_list = []
         for (arr, name) in reader:
@@ -21,6 +21,7 @@ class ModelNet(Dataset):
         if len(temp_list) % 12 != 0:
             # assert is a statement in python2/3, not a function
             assert "some shapes might not have 12 views"
+
         # b x v x c x d x d x d
         self.data = np.zeros((len(temp_list)//12, 12, 1, 32, 32, 32), dtype=np.float32)
         # all view share the same label
@@ -39,12 +40,15 @@ class ModelNet(Dataset):
                 # check label consistency
                 assert self.label[idx//12]==(int(name.split('.')[0])-1), "label is inconsistent among different views for file {}, original label{}".format(name, self.label[idx//12])
         #finish loading all data
-    
+        self.data = np.repeat(self.data, duplicate_channels, axis=2)
+
     def __len__(self):
         return self.label.shape[0]*12
 
     def __getitem__(self, idx):
-        return self.data[idx//12, idx%12], self.label[idx//12]
+        data = self.data[idx//12, idx%12]
+
+        return data, self.label[idx//12]
 
 
 if __name__ == '__main__':
