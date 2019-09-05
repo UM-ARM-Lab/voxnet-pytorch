@@ -25,7 +25,12 @@ def main(args):
     print("loading module")
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     module = importlib.import_module("models."+args.model)
-    model = module.VoxNet(num_classes=args.num_classes, input_shape=(32,32,32), num_channels=args.num_channels)
+    if args.model == 'voxnet_multientry':
+        model = module.VoxNetMultiEntry(num_classes=args.num_classes, input_shape=(32, 32, 32),
+                                        use_same_net=args.use_same_net,
+                                        num_grids=args.num_channels)
+    else:
+        model = module.VoxNet(num_classes=args.num_classes, input_shape=(32,32,32), num_channels=args.num_channels)
     model.to(device)
 
     # backup files
@@ -206,6 +211,8 @@ if __name__ == "__main__":
     parser.add_argument('--ckpt_dir', default='log', help='check point dir [default: log]')
     parser.add_argument('--ckpt_fname', default='model', help='check point name [default: model]')
     parser.add_argument('--num_channels', default=3, type=int, help='number of channels for voxel grid')
+    parser.add_argument('--use_same_net', action='store_true', help='For multiple channel voxel grid, use the same '
+                                                                    'network for each channel?')
     args = parser.parse_args()
 
     cudnn.benchmark = True
