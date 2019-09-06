@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-import torch.backends.cudnn as cudnn
+#import torch.backends.cudnn as cudnn
 from torch.utils.data import DataLoader
 from torch.autograd import Variable
 import torchvision.transforms as transforms
@@ -19,18 +19,28 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(os.path.dirname(BASE_DIR))
 sys.path.append(ROOT_DIR)
 from datasets.modelnet import ModelNet
+from datasets.rope_dataset import RopeDataset
 
 def main(args):
     # load network
     print("loading module")
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    print(torch.cuda.is_available())
     module = importlib.import_module("models."+args.model)
-    if args.model == 'voxnet_multientry':
-        model = module.VoxNetMultiEntry(num_classes=args.num_classes, input_shape=(32, 32, 32),
-                                        use_same_net=args.use_same_net,
-                                        num_grids=args.num_channels)
+    if args.rope_data:
+        input_shape = (34, 34, 34)
     else:
-        model = module.VoxNet(num_classes=args.num_classes, input_shape=(32,32,32), num_channels=args.num_channels)
+        input_shape = (32, 32, 32)
+
+    if args.model == 'voxnet_multientry':
+        model = module.VoxNetMultiEntry(num_classes=args.num_classes, input_shape=input_shape,
+                                        use_same_net=args.use_same_net,
+                                        num_grids=args.num_channels,
+                                        device=device)
+    else:
+        model = module.VoxNet(num_classes=args.num_classes,
+                              input_shape=input_shape,
+                              num_channels=args.num_channels)
     model.to(device)
 
     # backup files
@@ -42,8 +52,13 @@ def main(args):
     #logging.info('logs will be saved to {}'.format(args.log_fname))
     #logger = Logger(args.log_fname, reinitialize=True)
     print("loading dataset")
-    dset_train = ModelNet(os.path.join(ROOT_DIR, "data"), args.training_fname, duplicate_channels=args.num_channels)
-    dset_test = ModelNet(os.path.join(ROOT_DIR, "data"), args.testing_fname, duplicate_channels=args.num_channels)
+
+    if args.rope_data:
+        dset_train = RopeDataset(os.path.join(ROOT_DIR, "data/rope/train"), samples_per_file=1024)
+        dset_test = RopeDataset(os.path.join(ROOT_DIR, "data/rope/train"), samples_per_file=1024)
+    else:
+        dset_train = ModelNet(os.path.join(ROOT_DIR, "data"), args.training_fname, duplicate_channels=args.num_channels)
+        dset_test = ModelNet(os.path.join(ROOT_DIR, "data"), args.testing_fname, duplicate_channels=args.num_channels)
 
     train_loader = DataLoader(dset_train, batch_size=args.batch_size, shuffle=True, num_workers=4)
     test_loader = DataLoader(dset_test, batch_size=args.batch_size, num_workers=4)
@@ -59,7 +74,10 @@ def main(args):
     
     print("set optimizer")
     # set optimization methods
-    criterion = nn.CrossEntropyLoss()
+    if args.num_classes == 1:
+        criterion = nn.BCELoss()
+    else:
+        criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, args.decay_step, args.decay_rate)
 
@@ -92,13 +110,21 @@ def main(args):
             torch.save({
                 'epoch': epoch + 1,
                 #'state_dict': resnet.state_dict(),
-                'body': model.body.state_dict(),
-                'feat': model.head.state_dict(),
+                #'body': model.body.state_dict(),
+                #'feat': model.head.state_dict(),
+                'model': model.state_dict(),
                 'acc': avg_test_acc,
                 'best_acc': best_acc,
                 'optimizer': optimizer.state_dict()
             }, os.path.join(args.log_dir, args.saved_fname+".pth.tar"))
 
+            if args.save_to_pt:
+                #model.eval()
+                with torch.no_grad():
+                    example_x, _ = dset_train[0]
+                    example = torch.from_numpy(example_x).to(device)
+                    traced_model = torch.jit.trace(model, example.view(1, *example.size()))
+                    traced_model.save(args.log_dir + '/' + args.saved_fname + "_cuda.pt")
     LOG_FOUT.close()
     return
 
@@ -142,7 +168,13 @@ def train(loader, model, criterion, optimizer, device):
         loss = criterion(outputs, targets)
 
         total_loss += loss.item()
-        _, predicted = torch.max(outputs.detach(), 1)
+
+        # Do predictions
+        if criterion.__class__ == nn.BCELoss:
+            predicted = outputs.detach().round()
+        else:
+            _, predicted = torch.max(outputs.detach(), 1)
+
         total += batch_size
         correct += (predicted == targets).cpu().sum()
 
@@ -181,8 +213,12 @@ def test(loader, model, criterion, optimizer, device):
 
             total_loss += loss.item()
             n += 1
+            # Do predictions
+            if criterion.__class__ == nn.BCELoss:
+                predicted = outputs.detach().round()
+            else:
+                _, predicted = torch.max(outputs.detach(), 1)
 
-            _, predicted = torch.max(outputs.detach(), 1)
             total += targets.size(0)
             correct += (predicted == targets).cpu().sum()
 
@@ -194,8 +230,9 @@ def test(loader, model, criterion, optimizer, device):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--training_fname', type=Path, help='training .tar file')
-    parser.add_argument('--testing_fname', type=Path, help='testing .tar file')
+    parser.add_argument('--training_fname', type=Path, help='training .tar file or directory')
+    parser.add_argument('--testing_fname', type=Path, help='testing .tar file or directoy')
+    parser.add_argument('--rope_data', action='store_true', help='Use data for rope with robot grippers')
     parser.add_argument('--model', default='voxnet', help='Model name: [default:voxnet]')
     parser.add_argument('--log_dir', default='log', help='Log dir [default: log]')
     parser.add_argument('--num_classes', type=int, default=40, help='Category Number [10/30/40] [default: 40]')
@@ -213,7 +250,8 @@ if __name__ == "__main__":
     parser.add_argument('--num_channels', default=3, type=int, help='number of channels for voxel grid')
     parser.add_argument('--use_same_net', action='store_true', help='For multiple channel voxel grid, use the same '
                                                                     'network for each channel?')
+    parser.add_argument('--save_to_pt', action='store_true', help='save to pt for loading with libtorch')
     args = parser.parse_args()
 
-    cudnn.benchmark = True
+    #cudnn.benchmark = True
     main(args)

@@ -31,7 +31,8 @@ class VoxNetHead(nn.Module):
             ('fc1', nn.Linear(num_features, 128)),
             ('relu1', nn.ReLU()),
             ('drop3', nn.Dropout(p=0.4)),
-            ('fc2', nn.Linear(128, num_classes))
+            ('fc2', nn.Linear(128, num_classes)),
+            ('sig', nn.Sigmoid())
         ]))
 
     def forward(self, x):
@@ -42,7 +43,8 @@ class VoxNetMultiEntry(nn.Module):
 
     def __init__(self, num_classes, input_shape=(32, 32, 32),
                  use_same_net=False,
-                 num_grids=3):
+                 num_grids=3,
+                 device='cpu'):
                  #weights_path=None,
                  #load_body_weights=True,
                  #load_head_weights=True):
@@ -74,21 +76,19 @@ class VoxNetMultiEntry(nn.Module):
         self.input_shape = input_shape
         # Use just one body network or have multiple copies for each grid?
         if self.use_same_network:
-            self.body = [VoxNetBody()]
-
+            self.body1 = VoxNetBody()
         else:
-            self.body = []
-            for i in range(num_grids):
-                self.body.append(VoxNetBody)
+            self.body1 = VoxNetBody()
+            self.body2 = VoxNetBody()
+            self.body3 = VoxNetBody()
 
         # Trick to accept different input shapes
-        x = self.body[0](torch.autograd.Variable(
+        x = self.body1(torch.autograd.Variable(
             torch.rand((1, 1) + input_shape)))
         first_fc_in_features = num_grids
         for n in x.size()[1:]:
             first_fc_in_features *= n
 
-        print(first_fc_in_features)
         self.head = VoxNetHead(first_fc_in_features, num_classes)
 
         #if weights_path is not None:
@@ -105,12 +105,16 @@ class VoxNetMultiEntry(nn.Module):
 
         :return:
         '''
-        features = []
-        for i in range(self.num_grids):
-            body_idx = 0 if self.use_same_network else i
-            x = self.body[body_idx](voxel_grids[:, i].view(-1, 1, *self.input_shape))
-            features.append(x.view(x.size()[0], -1))
+        batch_size = voxel_grids.size()[0]
+        if self.use_same_network:
+            x1 = self.body1(voxel_grids[:, 0].view(-1, 1, *self.input_shape))
+            x2 = self.body1(voxel_grids[:, 1].view(-1, 1, *self.input_shape))
+            x3 = self.body1(voxel_grids[:, 2].view(-1, 1, *self.input_shape))
+        else:
+            x1 = self.body1(voxel_grids[:, 0].view(-1, 1, *self.input_shape))
+            x2 = self.body2(voxel_grids[:, 1].view(-1, 1, *self.input_shape))
+            x3 = self.body3(voxel_grids[:, 2].view(-1, 1, *self.input_shape))
 
-        # Stack features into one big vector
-        features = torch.cat(features, 1)
+        # stack features
+        features = torch.cat((x1, x2, x3), 1).view(batch_size, -1)
         return self.head(features)
