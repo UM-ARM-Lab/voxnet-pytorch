@@ -10,7 +10,7 @@ python train.py \
     --optimizer adam \
     --decay_step 4 \
     --decay_rate 0.8 \
-    --saved_fname weight10 \
+    --saved_fname rope_multientry_same_net \
     --num_channels 3 \
     --save_to_pt \
     --use_same_net

@@ -54,14 +54,17 @@ def main(args):
     print("loading dataset")
 
     if args.rope_data:
-        dset_train = RopeDataset(os.path.join(ROOT_DIR, "data/rope/train"), samples_per_file=1024)
-        dset_test = RopeDataset(os.path.join(ROOT_DIR, "data/rope/train"), samples_per_file=1024)
+        data_dir = '/mnt/big_narstie_data/dmcconac'
+        data_dir += '/transition_learning_data_generation/smmap_generated_plans'
+        data_dir += '/rope_hooks_simple/generate_training_examples/raw_data'
+        dset_train = RopeDataset(data_dir + '/train', samples_per_file=1024)
+        dset_test = RopeDataset(data_dir + '/test', samples_per_file = 1024)
     else:
         dset_train = ModelNet(os.path.join(ROOT_DIR, "data"), args.training_fname, duplicate_channels=args.num_channels)
         dset_test = ModelNet(os.path.join(ROOT_DIR, "data"), args.testing_fname, duplicate_channels=args.num_channels)
 
-    train_loader = DataLoader(dset_train, batch_size=args.batch_size, shuffle=True, num_workers=4)
-    test_loader = DataLoader(dset_test, batch_size=args.batch_size, num_workers=4)
+    train_loader = DataLoader(dset_train, batch_size=args.batch_size, shuffle=True, num_workers=8)
+    test_loader = DataLoader(dset_test, batch_size=args.batch_size, num_workers=8)
     
     global LOG_FOUT
     LOG_FOUT = open(os.path.join(args.log_dir, 'log.txt'), 'w')
