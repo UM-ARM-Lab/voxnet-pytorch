@@ -3,7 +3,7 @@ python train.py \
     --model voxnet_multientry \
     --log_dir log_10 \
     --num_classes 1 \
-    --max_epoch 100 \
+    --max_epoch 32 \
     --batch_size 64 \
     --learning_rate 0.001 \
     --momentum 0.9 \
