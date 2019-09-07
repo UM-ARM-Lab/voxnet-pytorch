@@ -39,7 +39,6 @@ class RopeDataset(Dataset):
         label = data[key + '/label']
 
         x = np.stack((local_env, band_pre, band_post), axis=0)
-
         return x, label
 
 

@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 #import torch.backends.cudnn as cudnn
 from torch.utils.data import DataLoader
+from torch.utils.data.sampler import WeightedRandomSampler
 from torch.autograd import Variable
 import torchvision.transforms as transforms
 
@@ -14,6 +15,9 @@ import os
 import sys
 import importlib
 import argparse
+import csv
+from sklearn.metrics import confusion_matrix, classification_report, roc_curve, auc
+import matplotlib.pyplot as plt
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(os.path.dirname(BASE_DIR))
@@ -24,13 +28,13 @@ from datasets.rope_dataset import RopeDataset
 def main(args):
     # load network
     print("loading module")
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
     print(torch.cuda.is_available())
     module = importlib.import_module("models."+args.model)
-    if args.rope_data:
-        input_shape = (34, 34, 34)
-    else:
-        input_shape = (32, 32, 32)
+    #if args.rope_data:
+    #    input_shape = (34, 34, 34)
+    #else:
+    input_shape = (32, 32, 32)
 
     if args.model == 'voxnet_multientry':
         model = module.VoxNetMultiEntry(num_classes=args.num_classes, input_shape=input_shape,
@@ -53,25 +57,56 @@ def main(args):
     #logger = Logger(args.log_fname, reinitialize=True)
     print("loading dataset")
 
-    if args.rope_data:
-        dset_train = RopeDataset(os.path.join(ROOT_DIR, "data/rope/train"), samples_per_file=1024)
-        dset_test = RopeDataset(os.path.join(ROOT_DIR, "data/rope/train"), samples_per_file=1024)
-    else:
-        dset_train = ModelNet(os.path.join(ROOT_DIR, "data"), args.training_fname, duplicate_channels=args.num_channels)
-        dset_test = ModelNet(os.path.join(ROOT_DIR, "data"), args.testing_fname, duplicate_channels=args.num_channels)
-
-    train_loader = DataLoader(dset_train, batch_size=args.batch_size, shuffle=True, num_workers=4)
-    test_loader = DataLoader(dset_test, batch_size=args.batch_size, num_workers=4)
-    
     global LOG_FOUT
     LOG_FOUT = open(os.path.join(args.log_dir, 'log.txt'), 'w')
-    log_string(args)
+    print(args)
+
+
+    if args.rope_data:
+        #data_dir = '/mnt/big_narstie_data/dmcconac'
+        #data_dir +='/transition_learning_data_generation/smmap_generated_plans'
+        #data_dir +='/rope_hooks_simple/generate_training_examples/raw_data'
+        data_dir = '../../data'
+        dset_train = RopeDataset(data_dir + '/train', samples_per_file=1024)
+        dset_test = RopeDataset(data_dir + '/test', samples_per_file=1024)
+        # Load labels separately to do weighted sampling
+        with open(data_dir + '/training_labels.csv', 'r') as infile:
+            csv_reader = csv.reader(infile, delimiter=',')
+            labels = []
+            for line in csv_reader:
+                if len(line) == 2:
+                    labels.append(int(line[1]))
+        labels = np.asarray(labels)
+
+    else:
+        dset_train = ModelNet(os.path.join(ROOT_DIR, "data"),
+                             args.training_fname,
+                            duplicate_channels=args.num_channels)
+        dset_test = ModelNet(os.path.join(ROOT_DIR, "data"),
+                             args.testing_fname,
+                            duplicate_channels=args.num_channels)
+
+    fraction_positive = float(np.sum(labels)) / len(labels)
+    print(fraction_positive)
+    weights = np.ones(len(labels))
+    weights[labels==1] *= 1 - fraction_positive
+    weights[labels==0] *= fraction_positive
+    print(weights)
+    sampler = WeightedRandomSampler(weights=weights,
+                                    num_samples=len(weights),
+                                    replacement=True)
+
+    train_loader = DataLoader(dset_train, batch_size=args.batch_size,
+                              shuffle=False, sampler=sampler, drop_last=True,
+                              num_workers=32)
+    test_loader = DataLoader(dset_test, batch_size=args.batch_size,
+                             num_workers=32)
 
     start_epoch = 0
     best_acc = 0.
     if args.cont:
         start_epoch, best_acc = load_checkpoint(args, model)
-    
+
     print("set optimizer")
     # set optimization methods
     if args.num_classes == 1:
@@ -81,58 +116,97 @@ def main(args):
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, args.decay_step, args.decay_rate)
 
+    train_losses = []
+    val_losses = []
+    train_accuracies = []
+    val_accuracies = []
+
     for epoch in range(start_epoch, args.max_epoch):
         scheduler.step()
-        log_string('\n-----------------------------------')
-        log_string('Epoch: [%d/%d]' % (epoch+1, args.max_epoch))
+        print('\n-----------------------------------')
+        print('Epoch: [%d/%d]' % (epoch+1, args.max_epoch))
         start = time.time()
 
         model.train()
-        train(train_loader, model, criterion, optimizer, device)
-        log_string('Time taken: %.2f sec.' % (time.time() - start))
+        train_acc, train_loss = train(train_loader, model, criterion, optimizer, device)
+        print('Time taken: %.2f sec.' % (time.time() - start))
 
         model.eval()
-        avg_test_acc, avg_loss = test(test_loader, model, criterion, optimizer, device)
+        avg_test_acc, avg_loss = test(test_loader, model, criterion, optimizer, device, args, report=False)
 
-        log_string('\nEvaluation:')
-        log_string('\tVal Acc: %.2f - Loss: %.4f' % (avg_test_acc, avg_loss))
-        log_string('\tCurrent best val acc: %.2f' % best_acc)
+        print('\nEvaluation:')
+        print('\tVal Acc: %.2f - Loss: %.4f' % (avg_test_acc, avg_loss))
+        print('\tCurrent best val acc: %.2f' % best_acc)
 
         # Log epoch to tensorboard
         # See log using: tensorboard --logdir='logs' --port=6006
         #util.logEpoch(logger, resnet, epoch + 1, avg_loss, avg_test_acc)
 
-        # Save model
-        if avg_test_acc > best_acc:
-            log_string('\tSaving checkpoint - Acc: %.2f' % avg_test_acc)
-            best_acc = avg_test_acc
-            best_loss = avg_loss
-            torch.save({
-                'epoch': epoch + 1,
-                #'state_dict': resnet.state_dict(),
-                #'body': model.body.state_dict(),
-                #'feat': model.head.state_dict(),
-                'model': model.state_dict(),
-                'acc': avg_test_acc,
-                'best_acc': best_acc,
-                'optimizer': optimizer.state_dict()
-            }, os.path.join(args.log_dir, args.saved_fname+".pth.tar"))
 
-            if args.save_to_pt:
-                #model.eval()
-                with torch.no_grad():
-                    example_x, _ = dset_train[0]
-                    example = torch.from_numpy(example_x).to(device)
-                    traced_model = torch.jit.trace(model, example.view(1, *example.size()))
-                    traced_model.save(args.log_dir + '/' + args.saved_fname + "_cuda.pt")
+        train_losses.append(train_loss)
+        train_accuracies.append(train_acc)
+        val_losses.append(avg_loss)
+        val_accuracies.append(avg_test_acc)
+
+        np.save(args.log_dir + '/' + args.saved_fname + 'train_loss.npy',
+                np.asarray(train_losses))
+        np.save(args.log_dir + '/' + args.saved_fname + 'test_loss.npy',
+                np.asarray(val_losses))
+        np.save(args.log_dir + '/' + args.saved_fname + 'train_acc.npy',
+                np.asarray(train_accuracies))
+        np.save(args.log_dir + '/' + args.saved_fname + 'test_acc.npy',
+                np.asarray(val_accuracies))
+
+
+    print('Finished training!')
+    # Save model
+    print('Saving model - Acc: %.2f' % avg_test_acc)
+    best_acc = avg_test_acc
+    best_loss = avg_loss
+    torch.save({
+        'epoch': epoch + 1,
+        #'state_dict': resnet.state_dict(),
+        #'body': model.body.state_dict(),
+        #'feat': model.head.state_dict(),
+        'model': model.state_dict(),
+        'acc': avg_test_acc,
+        'best_acc': best_acc,
+        'optimizer': optimizer.state_dict()
+    }, os.path.join(args.log_dir, args.saved_fname+".pth.tar"))
+
+    if args.save_to_pt:
+        #model.eval()
+        with torch.no_grad():
+            example_x, _ = dset_train[0]
+            example = torch.from_numpy(example_x).to('cuda:0')
+            model.to('cuda:0')
+            traced_model = torch.jit.trace(model, example.view(1, *example.size()))
+            traced_model.save(args.log_dir + '/' + args.saved_fname + "_cuda.pt")
+
+            example = example.to('cpu')
+            model.to('cpu')
+            traced_model = torch.jit.trace(model, example.view(1, *example.size()))
+            traced_model.save(args.log_dir + '/' + args.saved_fname + "_cpu.pt")
+
+            model.to(device)
+
+    model.eval()
+    print('Report on train set')
+    _, _ = test(train_loader, model, criterion, optimizer, device, args, report=True, name='train')
+
+    print('Report on test set')
+    _, _ = test(test_loader, model, criterion, optimizer, device, args, report=True, name='test')
+
+
+
     LOG_FOUT.close()
     return
 
-    
+
 def log_string(out_str):
     LOG_FOUT.write(str(out_str)+'\n')
     LOG_FOUT.flush()
-    print(out_str)
+    log_string(out_str)
 
 
 def load_checkpoint(args, model):
@@ -157,7 +231,10 @@ def train(loader, model, criterion, optimizer, device):
     correct = torch.LongTensor([0])
     total_loss = 0.
 
+    #end = time.time()
     for i, (inputs, targets) in enumerate(loader):
+        #start = time.time()
+        #print('Load time: ', start - end)
         #inputs = torch.from_numpy(inputs)
         inputs, targets = inputs.to(device), targets.to(device)
         # in 0.4.0 variable and tensor are merged
@@ -183,22 +260,32 @@ def train(loader, model, criterion, optimizer, device):
         loss.backward()
         optimizer.step()
 
-        log_iter = 1000
-        if (i + 1) % log_iter == 0:
-            log_string("\tIter [%d/%d] Loss: %.4f" % (i + 1, num_batch, total_loss/log_iter))
-            total_loss = 0.
+        #log_iter = 1000
+        #f (i + 1) % log_iter == 0:
+        #  print("\tIter [%d/%d] Loss: %.4f" % (i + 1, num_batch, total_loss/log_iter))
+        # total_loss = 0.
 
-    log_string("Train Accuracy %.2f" % (100.0 * correct.item() / total.item()))
-    return
+        #end = time.time()
+        #print("Batch processing time:", end - start)
+
+    loss = total_loss / (i+1)
+    acc = 100. * correct.item() / total.item()
+    print("Train Loss %.4f  Train Accuracy %.2f" % (loss, acc))
+
+    return acc, loss
 
 
-def test(loader, model, criterion, optimizer, device):
+def test(loader, model, criterion, optimizer, device, args, report=False, name=None):
     # Eval
     total = torch.LongTensor([0])
     correct = torch.LongTensor([0])
 
     total_loss = 0.0
     n = 0
+
+    all_targets = []
+    all_predicted = []
+    all_scores = []
 
     for i, (inputs, targets) in enumerate(loader):
         with torch.no_grad():
@@ -222,11 +309,63 @@ def test(loader, model, criterion, optimizer, device):
             total += targets.size(0)
             correct += (predicted == targets).cpu().sum()
 
+            all_targets.append(targets.cpu())
+            all_predicted.append(predicted.cpu())
+            all_scores.append(outputs.detach().cpu())
+
+    if report:
+        targets = torch.cat(all_targets, 0).numpy()
+        predicted = torch.cat(all_predicted, 0).numpy()
+        scores = torch.cat(all_scores, 0).numpy()
+
+        # Calculate confusion matrix
+        tn, fp, fn, tp = confusion_matrix(targets, predicted).ravel()
+
+        # ROC curve
+        fname = args.log_dir + '/' + args.saved_fname + '_' + name
+        # pr, tpr = plot_roc(targets, scores, plot_name)
+
+        fpr, tpr, _ = roc_curve(targets, scores)
+        roc_data = np.stack((fpr, tpr), axis=0)
+        np.save(fname + '_roc.npy', roc_data)
+        np.save(fname + '_scores.npy', scores)
+        np.save(fname + '_targets.npy', targets)
+
+        # n_positives = targets.cpu().sum().numpy().flatten()[0]
+        #    n_negatives = total.cpu().numpy()[0] - n_positives
+
+
+        print('True positives: %d' % tp)
+        print('True negatives: %d' % tn)
+        print('False positives: %d' % fp)
+        print('False negatives: %d' % fn)
+
+        print("Classification report")
+
+        print(classification_report(targets, predicted))
+
     avg_test_acc = 100. * correct.item() / total.item()
     avg_loss = total_loss / n
 
     return avg_test_acc, avg_loss
 
+def plot_roc(targets, scores, name):
+
+    # ROC curve
+    fpr, tpr, _ = roc_curve(targets, scores)
+    roc_auc =  auc(fpr, tpr)
+    plt.figure()
+    lw = 2
+    plt.plot(fpr, tpr, color='darkorange',
+                 lw=lw, label='ROC curve (area = %0.2f)' % roc_auc)
+    plt.plot([0, 1], [0, 1], color='navy', lw=lw, linestyle='--')
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title('Receiver operating characteristic example')
+    plt.legend(loc="lower right")
+    plt.savefig(name)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -252,6 +391,5 @@ if __name__ == "__main__":
                                                                     'network for each channel?')
     parser.add_argument('--save_to_pt', action='store_true', help='save to pt for loading with libtorch')
     args = parser.parse_args()
-
     #cudnn.benchmark = True
     main(args)
